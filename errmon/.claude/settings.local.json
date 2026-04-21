@@ -1,0 +1,13 @@
+le{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(python -m uvicorn main:app --host 0.0.0.0 --port 8000)",
+      "Bash(PYTHONIOENCODING=utf-8 python -m uvicorn main:app --host 0.0.0.0 --port 8000)",
+      "Bash(curl -s http://localhost:8000/api/health)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(curl -s -I -X OPTIONS http://localhost:8000/api/dashboard/ -H \"Origin: http://localhost:5173\" -H \"Access-Control-Request-Method: GET\")",
+      "Bash(npm run *)"
+    ]
+  }
+}

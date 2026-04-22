@@ -19,8 +19,8 @@ class FixStatus(str, Enum):
 
 class AIProvider(str, Enum):
     anthropic = "anthropic"
-    bedrock = "bedrock"
-    github = "github"
+    openai = "openai"
+    google = "google"
 
 # Settings Models
 class GitHubSettings(BaseModel):

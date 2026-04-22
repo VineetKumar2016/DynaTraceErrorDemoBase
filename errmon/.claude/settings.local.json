@@ -1,4 +1,4 @@
-le{
+{
   "permissions": {
     "allow": [
       "Bash(pip install *)",
@@ -7,7 +7,16 @@ le{
       "Bash(curl -s http://localhost:8000/api/health)",
       "Bash(taskkill //F //IM python.exe)",
       "Bash(curl -s -I -X OPTIONS http://localhost:8000/api/dashboard/ -H \"Origin: http://localhost:5173\" -H \"Access-Control-Request-Method: GET\")",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 29732)",
+      "Bash(pkill -f \"uvicorn main:app\")",
+      "Bash(PYTHONIOENCODING=utf-8 python main.py)",
+      "Bash(curl -s http://localhost:8000/api/settings/github/repos)",
+      "Bash(python -c ' *)",
+      "Bash(pkill -f \"python main.py\")",
+      "Bash(pkill -f \"python -m uvicorn\")",
+      "Bash(xargs kill *)"
     ]
   }
 }

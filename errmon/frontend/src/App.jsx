@@ -25,10 +25,10 @@ const NAV_STYLE = `
 `;
 
 const THEMES = [
-  { value: 'dark',     label: 'Dark' },
+  { value: 'dark', label: 'Dark' },
   { value: 'midnight', label: 'Midnight' },
-  { value: 'nord',     label: 'Nord' },
-  { value: 'light',    label: 'Light' },
+  { value: 'nord', label: 'Nord' },
+  { value: 'light', label: 'Light' },
 ];
 
 export default function App() {
@@ -79,7 +79,7 @@ export default function App() {
       )}
 
       <nav className="nav">
-        <div className="nav-logo">◈ errmon</div>
+        <div className="nav-logo">◈ Errmon</div>
         {NAV.map((n) => (
           <span key={n} className={`nav-link${isActive(n) ? ' active' : ''}`} onClick={() => navigate(n)}>
             {n}
@@ -89,7 +89,7 @@ export default function App() {
           <select className="theme-select" value={theme} onChange={(e) => setTheme(e.target.value)} title="Switch theme">
             {THEMES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
-          <div className={`health-dot${health?.status === 'ok' ? ' ok' : health ? ' err' : ''}`} title={health ? `API: ${health.status} | DB: ${health.mongo}` : 'Checking…'} />
+          <div className={`health-dot${health?.status === 'ok' ? ' ok' : health ? ' err' : ''}`} title={health ? `API: ${health.status} | Store: ${health.store}` : 'Checking…'} />
           <span style={{ fontSize: '.72rem', color: 'var(--text3)', cursor: 'pointer' }} onClick={() => setShowWizard(true)}>⚙ setup</span>
         </div>
       </nav>

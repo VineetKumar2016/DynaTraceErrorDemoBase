@@ -273,7 +273,7 @@ export function Architecture() {
         </div>
         <div className="card">
           <div className="card-label mb3">Technology Stack</div>
-          {[['Frontend', 'React + Vite', 'var(--blue)'], ['Backend', 'Python FastAPI', 'var(--yellow)'], ['Database', 'MongoDB', 'var(--green)'], ['AI', 'Claude / GPT / Bedrock', 'var(--purple)'], ['Monitoring', 'Dynatrace Grail API', 'var(--orange)'], ['VCS', 'GitHub REST API', 'var(--text2)']].map(([k, v, c]) => (
+          {[['Frontend', 'React + Vite', 'var(--blue)'], ['Backend', 'Python FastAPI', 'var(--yellow)'], ['Database', 'JSON File', 'var(--green)'], ['AI', 'Claude / GPT / Bedrock', 'var(--purple)'], ['Monitoring', 'Dynatrace Grail API', 'var(--orange)'], ['VCS', 'GitHub REST API', 'var(--text2)']].map(([k, v, c]) => (
             <div key={k} className="flex jb mb2" style={{ fontSize: '.7rem' }}>
               <span className="text-muted">{k}</span>
               <span style={{ color: c }}>{v}</span>

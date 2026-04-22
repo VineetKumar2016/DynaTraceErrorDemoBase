@@ -19,6 +19,7 @@ from routes.prs       import router as prs_router
 from routes.scans     import router as scans_router
 from routes.dashboard import router as dashboard_router
 from routes.analysis  import router as analysis_router
+from routes.ingest    import router as ingest_router
 
 _poll_task = None
 
@@ -88,17 +89,13 @@ app.include_router(prs_router,       prefix="/api/prs")
 app.include_router(scans_router,     prefix="/api/scans")
 app.include_router(dashboard_router, prefix="/api/dashboard")
 app.include_router(analysis_router,  prefix="/api/analysis")
+app.include_router(ingest_router,    prefix="/api/ingest")
 
 @app.get("/api/health")
 async def health():
-    try:
-        await db.command("ping")
-        mongo_ok = True
-    except:
-        mongo_ok = False
     return {
         "status": "ok",
-        "store":  "file" if mongo_ok else "unavailable",
+        "store":  "file",
         "time":   datetime.now(timezone.utc).isoformat(),
         "poll":   "running" if (_poll_task and not _poll_task.done()) else "stopped",
     }

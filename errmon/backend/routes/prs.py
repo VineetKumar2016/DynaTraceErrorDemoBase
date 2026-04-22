@@ -1,6 +1,5 @@
 from fastapi import APIRouter
 from database import db
-from bson import ObjectId
 
 router = APIRouter(tags=["prs"])
 
@@ -20,10 +19,7 @@ async def list_prs():
     for doc in docs:
         error_id = doc.get("error_id", "")
         error = None
-        try:
-            error = await db.errors.find_one({"_id": ObjectId(error_id)})
-        except:
-            error = await db.errors.find_one({"_id": error_id})
+        error = await db.errors.find_one({"_id": error_id})
         prs.append({
             "id": doc.get("pr_number", str(doc["_id"])[:6]),
             "fix_id": str(doc["_id"]),

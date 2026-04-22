@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import {
   getSettings, saveGitHub, saveDynatrace, saveJira, saveAI, savePipeline,
-  testGitHub, testDynatrace, testJira, getGitHubRepos, uploadErrorsFile
+  testGitHub, testDynatrace, testJira, getGitHubRepos, uploadErrorsFile,
+  generateDynatraceToken, getHealth, generateFix,
 } from '../api';
 import { Btn, Spinner, useToast, Toast, StatusDot } from '../ui';
 
@@ -30,17 +31,20 @@ export default function Settings() {
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
+  const [health, setHealth] = useState(null);
   const [repos, setRepos] = useState([]);
   const [reposLoading, setReposLoading] = useState(false);
   const [repoSearch, setRepoSearch] = useState('');
   const [repoFilter, setRepoFilter] = useState('all');
+  const [generatingFix, setGeneratingFix] = useState(false);
   const toast = useToast();
 
   // Local form state
   const [gh, setGh] = useState({ token: '', org: '', enabled_repos: [] });
   const [dt, setDt] = useState({ platform_token: '', api_token: '', environment_url: '' });
+  const [generatingToken, setGeneratingToken] = useState(false);
   const [jira, setJira] = useState({ email: '', token: '', base_url: '', boards: [] });
-  const [ai, setAi] = useState({ provider: 'anthropic', investigation_model: 'claude-sonnet-4-6', triage_model: 'claude-sonnet-4-6', api_key: '', enable_agentic: true });
+  const [ai, setAi] = useState({ enable_agentic: true, investigation_provider: 'anthropic', investigation_model: 'claude-opus-4-6', investigation_api_key: '', triage_provider: 'anthropic', triage_model: 'claude-sonnet-4-6', triage_api_key: '' });
   const [pipeline, setPipeline] = useState({ enable_polling: true, pause_scanning: false, pause_fix_generation: false, poll_interval_minutes: 5, max_errors_per_scan: 20, agent_max_tool_calls: 30, agent_max_cost_usd: 15, target_environments: 'prod', environment_prefixes: 'prod-,staging-,dev-,qa-' });
 
   useEffect(() => {
@@ -59,12 +63,18 @@ export default function Settings() {
         setJira({ email: '', token: '', base_url: '', boards: [], ...jiraRest });
       }
       if (s.ai) {
-        const { api_key: _ak, ...aiRest } = s.ai;
-        setAi({ provider: 'anthropic', investigation_model: 'claude-sonnet-4-6', triage_model: 'claude-sonnet-4-6', api_key: '', enable_agentic: true, ...aiRest });
+        const { investigation_api_key: _iak, triage_api_key: _tak, ...aiRest } = s.ai;
+        setAi({ enable_agentic: true, investigation_provider: 'anthropic', investigation_model: 'claude-opus-4-6', investigation_api_key: '', triage_provider: 'anthropic', triage_model: 'claude-sonnet-4-6', triage_api_key: '', ...aiRest });
       }
       if (s.pipeline) setPipeline((p) => ({ ...p, ...s.pipeline }));
       setLoading(false);
+      if (s.github?.token) {
+        getGitHubRepos().then((res) => {
+          if (!res.error) setRepos(res.repos || []);
+        }).catch(() => {});
+      }
     }).catch(() => setLoading(false));
+    getHealth().then(setHealth).catch(() => {});
   }, []);
 
   const save = async (key, fn, data) => {
@@ -113,26 +123,47 @@ export default function Settings() {
     setGh((g) => ({ ...g, enabled_repos: updated }));
   };
 
+  const handleGenerateFix = async () => {
+    setGeneratingFix(true);
+    try {
+      const fixData = {
+        repo_name: 'Clone_Demo_Repo',
+        error_message: 'plugin:vite:oxc] Transform failed with 3 errors: in src/App.jsx',
+        prompt: 'create a branch from the main branch of provided repository, fix the issue mentioned in the error message and push the branch in git. After this raise the PR pointing to main branch. Newly created branch and PR should be visible in Git.'
+      };
+      
+      const response = await generateFix(fixData);
+      toast.success('Fix generation initiated! Check the fix details below.');
+      console.log('Generated fix:', response);
+    } catch (e) {
+      toast.error(`Failed to generate fix: ${e.message}`);
+    } finally {
+      setGeneratingFix(false);
+    }
+  };
+
   const ghConnected   = !!settings?.github?.token;
-  const dtConnected   = !!settings?.dynatrace?.platform_token;
+  const dtConnected   = !!settings?.dynatrace?.platform_token || !!settings?.dynatrace?.api_token;
   const jiraConnected = !!settings?.jira?.token;
-  const aiConnected   = !!settings?.ai?.api_key;
+  const aiConnected = !!settings?.ai?.investigation_api_key || !!settings?.ai?.triage_api_key
+    || settings?.ai?.investigation_provider === 'bedrock' || settings?.ai?.triage_provider === 'bedrock';
 
   // Buttons enabled only when the user has typed a credential in the field
   const ghTokenEntered   = gh.token.trim().length > 0;
-  const dtTokenEntered   = dt.platform_token.trim().length > 0;
+  const dtTokenEntered   = dt.platform_token.trim().length > 0 || dt.api_token.trim().length > 0;
   const jiraTokenEntered = jira.token.trim().length > 0;
-  // AI: Anthropic requires API key; other providers have no key field
-  const aiKeyEntered = ai.provider !== 'anthropic' || ai.api_key.trim().length > 0;
+  const invKeyEntered = ai.investigation_provider === 'bedrock' || ai.investigation_api_key.trim().length > 0;
+  const triKeyEntered = ai.triage_provider === 'bedrock' || ai.triage_api_key.trim().length > 0;
+  const aiKeyEntered  = invKeyEntered && triKeyEntered;
   const pipelineOk = true;
 
   const tabs = [
     { id: 'config', label: 'Configuration' },
-    { id: 'github', label: 'GitHub & Repos', dot: ghConnected ? 'green' : 'red' },
-    { id: 'dynatrace', label: 'Dynatrace', dot: dtConnected ? 'green' : 'red' },
-    { id: 'ai', label: 'AI Models', dot: aiConnected ? 'green' : 'red' },
-    { id: 'jira', label: 'Jira Boards', dot: jiraConnected ? 'green' : 'gray' },
-    { id: 'pipeline', label: 'Pipeline', dot: 'green' },
+    { id: 'github', label: 'GitHub & Repos', dot: ghConnected ? 'green' : null },
+    { id: 'dynatrace', label: 'Dynatrace', dot: dtConnected ? 'green' : null },
+    { id: 'ai', label: 'AI Models', dot: aiConnected ? 'green' : null },
+    { id: 'jira', label: 'Jira Boards', dot: jiraConnected ? 'green' : null },
+    { id: 'pipeline', label: 'Pipeline' },
     { id: 'upload', label: 'Upload Errors' },
   ];
 
@@ -190,7 +221,11 @@ export default function Settings() {
           <div className="section-card">
             <div className="section-title mb2">Connection Status</div>
             <div className="grid-3 mb3">
-              {[['API Status', 'OK', 'var(--green)'], ['MongoDB', 'OK', 'var(--green)'], ['Uptime', '—', 'var(--text)']].map(([label, val, c]) => (
+              {[
+                ['API Status', health?.status?.toUpperCase() ?? '…', health ? 'var(--green)' : 'var(--text3)'],
+                ['Store', health?.store ?? '…', 'var(--green)'],
+                ['Polling', health?.poll ?? '…', health?.poll === 'running' ? 'var(--green)' : 'var(--accent)'],
+              ].map(([label, val, c]) => (
                 <div key={label} style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 5, padding: '.75rem .9rem' }}>
                   <div className="card-label">{label}</div>
                   <div style={{ fontFamily: 'var(--sans)', fontSize: '1.1rem', fontWeight: 700, color: c }}>● {val}</div>
@@ -238,7 +273,7 @@ export default function Settings() {
           <div className="section-card">
             <div className="flex ic jb mb1">
               <div className="section-title">monitored repositories</div>
-              <Btn variant="secondary" size="sm" onClick={loadRepos} disabled={reposLoading || !ghTokenEntered}>
+              <Btn variant="secondary" size="sm" onClick={loadRepos} disabled={reposLoading || (!ghTokenEntered && !ghConnected)}>
                 {reposLoading ? <Spinner size={12} /> : 'sync from github'}
               </Btn>
             </div>
@@ -313,8 +348,11 @@ export default function Settings() {
             )}
 
             <div className="mt3">
-              <Btn onClick={() => save('github', saveGitHub, gh)} disabled={saving.github || !ghTokenEntered}>
+              <Btn onClick={() => save('github', saveGitHub, gh)} disabled={saving.github || (!ghTokenEntered && !ghConnected)}>
                 {saving.github ? <><span className="pulse">●</span> saving…</> : 'save repo selection'}
+              </Btn>
+              <Btn onClick={handleGenerateFix} disabled={generatingFix} style={{ marginLeft: '0.75rem' }}>
+                {generatingFix ? <><span className="pulse">●</span> generating…</> : 'generate fix'}
               </Btn>
             </div>
           </div>
@@ -326,32 +364,72 @@ export default function Settings() {
         <div className="section-card">
           <div className="flex ic jb mb1">
             <div className="section-title">dynatrace connection</div>
-            <div className="flex g3">
-              <a className="fs-xs text-accent" href="https://YOUR_ENV.apps.dynatrace.com/ui/access-tokens" target="_blank" rel="noreferrer">Platform tokens →</a>
-              <a className="fs-xs text-accent" href="https://YOUR_ENV.live.dynatrace.com/#settings/integration/apikeys" target="_blank" rel="noreferrer">API tokens →</a>
-            </div>
+            <a className="fs-xs text-accent" href="https://docs.dynatrace.com/docs/manage/access-control/access-tokens" target="_blank" rel="noreferrer">Token docs →</a>
           </div>
-          <div className="section-desc">Provide Dynatrace tokens to query error logs via the Grail API.</div>
+          <div className="section-desc">Enter your API Token to auto-generate a scoped platform token, or paste a platform token directly.</div>
+
+          {/* Environment URL */}
           <div className="form-group">
             <label className="form-label">Environment URL</label>
             <input className="form-input" value={dt.environment_url} onChange={(e) => setDt((d) => ({ ...d, environment_url: e.target.value }))} placeholder="https://xxx.live.dynatrace.com" />
             <div className="form-hint">Your Dynatrace environment base URL.</div>
           </div>
+
+          {/* API Token + Fetch Platform Token button */}
+          <div className="form-group">
+            <label className="form-label">API Token</label>
+            <div className="flex ic g3">
+              <input
+                className="form-input"
+                type="password"
+                style={{ flex: 1 }}
+                value={dt.api_token}
+                onChange={(e) => setDt((d) => ({ ...d, api_token: e.target.value }))}
+                placeholder="dt0c01.…"
+              />
+              {dt.api_token.trim() && (
+                <Btn
+                  variant="secondary"
+                  disabled={!dt.environment_url.trim() || generatingToken}
+                  onClick={async () => {
+                    setGeneratingToken(true);
+                    try {
+                      const res = await generateDynatraceToken({ pat: dt.api_token, environment_url: dt.environment_url });
+                      setDt((d) => ({ ...d, platform_token: res.token }));
+                      toast.success(res.generated ? 'Platform token generated — save to apply' : 'PAT copied as platform token — save to apply');
+                    } catch (e) {
+                      toast.error(e.message);
+                    }
+                    setGeneratingToken(false);
+                  }}
+                >
+                  {generatingToken ? <><span className="pulse">●</span> generating…</> : 'Fetch Platform Token'}
+                </Btn>
+              )}
+            </div>
+            <div className="form-hint">Needs <code>apiTokens.write</code> scope to generate a platform token.</div>
+          </div>
+
+          {/* Platform token (auto-filled or manual) */}
           <div className="form-group">
             <label className="form-label">Platform Token</label>
-            <input className="form-input" type="password" value={dt.platform_token} onChange={(e) => setDt((d) => ({ ...d, platform_token: e.target.value }))} placeholder="dt0e01.…" />
-            <div className="form-hint">Scopes: <code>storage:logs:read</code> <code>storage:buckets:read</code> <code>storage:metrics:read</code></div>
+            <input
+              className="form-input"
+              type="password"
+              value={dt.platform_token}
+              onChange={(e) => setDt((d) => ({ ...d, platform_token: e.target.value }))}
+              placeholder="auto-filled after Fetch Platform Token, or paste manually"
+            />
+            <div className="form-hint">
+              Scopes auto-created: <code>logs.ingest</code> <code>logs.read</code> <code>metrics.read</code> <code>entities.read</code> <code>problems.read</code>
+            </div>
             {dtConnected && !dtTokenEntered && (
               <div style={{ fontSize: '.65rem', color: 'var(--yellow)', marginTop: '.4rem' }}>
-                A token is already saved. Enter your platform token to update it or enable actions.
+                A token is already saved. Generate or paste a new one to update.
               </div>
             )}
           </div>
-          <div className="form-group">
-            <label className="form-label">API Token (Optional)</label>
-            <input className="form-input" type="password" value={dt.api_token} onChange={(e) => setDt((d) => ({ ...d, api_token: e.target.value }))} placeholder="dt0c01.…" />
-            <div className="form-hint" style={{ color: 'var(--accent)' }}>For Environment API v2 (Problems). Scope: <code>problems.read</code>. Optional.</div>
-          </div>
+
           <SaveRow
             onSave={() => save('dynatrace', saveDynatrace, dt)}
             onTest={() => test('dynatrace', () => testDynatrace({ platform_token: dt.platform_token, environment_url: dt.environment_url }))}
@@ -364,56 +442,115 @@ export default function Settings() {
       )}
 
       {/* ── AI MODELS ── */}
-      {tab === 'ai' && (
-        <div className="section-card">
-          <div className="section-title mb1">ai provider</div>
-          <div className="section-desc">Configure the AI model used for triage and deep agentic investigation.</div>
-          <div className="flex ic g4 mb4">
-            {[['anthropic', 'Anthropic API'], ['bedrock', 'AWS Bedrock'], ['github', 'GitHub Copilot']].map(([v, l]) => (
-              <label key={v} className="flex ic g2" style={{ cursor: 'pointer', fontSize: '.73rem', color: ai.provider === v ? 'var(--text)' : 'var(--text2)' }}>
-                <input type="radio" name="provider" value={v} checked={ai.provider === v} onChange={() => setAi((a) => ({ ...a, provider: v }))} style={{ accentColor: 'var(--accent)' }} />
-                {l}
-              </label>
-            ))}
-          </div>
-          <label className="checkbox-row mb4">
-            <input type="checkbox" checked={ai.enable_agentic} onChange={(e) => setAi((a) => ({ ...a, enable_agentic: e.target.checked })) } />
-            <span>Enable agentic pipeline</span>
-            <span className="checkbox-hint">(tool-calling investigation)</span>
-          </label>
-          <div className="grid-2 mb3">
-            <div className="form-group">
-              <label className="form-label">Investigation Model ID</label>
-              <input className="form-input" value={ai.investigation_model} onChange={(e) => setAi((a) => ({ ...a, investigation_model: e.target.value }))} />
-              <div className="form-hint">Deep agentic analysis model (e.g. claude-opus-4-6).</div>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Triage Model ID</label>
-              <input className="form-input" value={ai.triage_model} onChange={(e) => setAi((a) => ({ ...a, triage_model: e.target.value }))} />
-              <div className="form-hint">Fast classification model.</div>
-            </div>
-          </div>
-          {ai.provider === 'anthropic' && (
+      {tab === 'ai' && (() => {
+        const ANTHROPIC_MODELS = [
+          { id: 'claude-opus-4-6',              label: 'Claude Opus 4.6' },
+          { id: 'claude-sonnet-4-6',            label: 'Claude Sonnet 4.6' },
+          { id: 'claude-haiku-4-5-20251001',    label: 'Claude Haiku 4.5' },
+          { id: 'claude-3-7-sonnet-20250219',   label: 'Claude 3.7 Sonnet' },
+          { id: 'claude-3-5-sonnet-20241022',   label: 'Claude 3.5 Sonnet' },
+          { id: 'claude-3-5-haiku-20241022',    label: 'Claude 3.5 Haiku' },
+          { id: 'claude-3-opus-20240229',       label: 'Claude 3 Opus' },
+        ];
+        const OPENAI_MODELS = [
+          { id: 'gpt-4o',       label: 'GPT-4o' },
+          { id: 'gpt-4o-mini',  label: 'GPT-4o Mini' },
+          { id: 'gpt-4-turbo',  label: 'GPT-4 Turbo' },
+          { id: 'o1',           label: 'o1' },
+          { id: 'o1-mini',      label: 'o1 Mini' },
+          { id: 'o3-mini',      label: 'o3 Mini' },
+          { id: 'o4-mini',      label: 'o4 Mini' },
+        ];
+        const GOOGLE_MODELS = [
+          { id: 'gemini-2.5-pro',        label: 'Gemini 2.5 Pro' },
+          { id: 'gemini-2.5-flash',      label: 'Gemini 2.5 Flash' },
+          { id: 'gemini-2.0-flash',      label: 'Gemini 2.0 Flash' },
+          { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite' },
+          { id: 'gemini-1.5-pro',        label: 'Gemini 1.5 Pro' },
+          { id: 'gemini-1.5-flash',      label: 'Gemini 1.5 Flash' },
+        ];
+        const MODEL_OPTIONS = { anthropic: ANTHROPIC_MODELS, openai: OPENAI_MODELS, google: GOOGLE_MODELS };
+        const PROVIDERS = [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['google', 'Google']];
+
+        const ModelSection = ({ title, providerKey, modelKey, apiKeyKey, keyHint, modelPlaceholder }) => {
+          const prov   = ai[providerKey] || 'anthropic';
+          const apiKey = ai[apiKeyKey]   || '';
+          const isSaved = prov === 'bedrock'
+            ? false
+            : prov === 'anthropic' ? !!settings?.ai?.[apiKeyKey] : !!settings?.ai?.[apiKeyKey];
+          return (
             <div style={{ background: 'var(--bg3)', border: '1px solid var(--border2)', borderRadius: 5, padding: '1.1rem', marginBottom: '1rem' }}>
-              <div className="flex ic jb mb3">
-                <div className="card-label" style={{ margin: 0 }}>Anthropic Configuration</div>
-                <a className="fs-xs text-accent" href="https://console.anthropic.com/keys" target="_blank" rel="noreferrer">Anthropic Console →</a>
-              </div>
+              <div className="card-label mb3">{title}</div>
+              {/* Provider */}
               <div className="form-group">
-                <label className="form-label">API Key</label>
-                <input className="form-input" type="password" value={ai.api_key} onChange={(e) => setAi((a) => ({ ...a, api_key: e.target.value }))} placeholder="sk-ant-…" />
-                <div className="form-hint">Your Anthropic API key for Claude models.</div>
-                {aiConnected && !ai.api_key.trim() && (
-                  <div style={{ fontSize: '.65rem', color: 'var(--yellow)', marginTop: '.4rem' }}>
-                    An API key is already saved. Enter your key to update it or enable actions.
-                  </div>
+                <label className="form-label">Provider</label>
+                <div className="flex ic g4">
+                  {PROVIDERS.map(([v, l]) => (
+                    <label key={v} className="flex ic g2" style={{ cursor: 'pointer', fontSize: '.73rem', color: prov === v ? 'var(--text)' : 'var(--text2)' }}>
+                      <input type="radio" name={providerKey} value={v} checked={prov === v} onChange={() => setAi((a) => ({ ...a, [providerKey]: v }))} style={{ accentColor: 'var(--accent)' }} />
+                      {l}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {/* Model */}
+              <div className="form-group">
+                <label className="form-label">Model</label>
+                {MODEL_OPTIONS[prov] ? (
+                  <select className="form-input" value={ai[modelKey]} onChange={(e) => setAi((a) => ({ ...a, [modelKey]: e.target.value }))}>
+                    {MODEL_OPTIONS[prov].map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                ) : (
+                  <input className="form-input" value={ai[modelKey]} onChange={(e) => setAi((a) => ({ ...a, [modelKey]: e.target.value }))} placeholder={modelPlaceholder} />
                 )}
               </div>
+              {/* API Key (not needed for Bedrock) */}
+              {prov !== 'bedrock' && (
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">API Key</label>
+                  <input className="form-input" type="password" value={apiKey} onChange={(e) => setAi((a) => ({ ...a, [apiKeyKey]: e.target.value }))}
+                    placeholder={prov === 'openai' ? 'sk-…' : prov === 'google' ? 'AIzaSy…' : 'sk-ant-…'} />
+                  <div className="form-hint">{keyHint}</div>
+                  {isSaved && !apiKey.trim() && (
+                    <div style={{ fontSize: '.65rem', color: 'var(--yellow)', marginTop: '.4rem' }}>
+                      A key is already saved. Enter it again to update or enable actions.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          )}
-          <SaveRow onSave={() => save('ai', saveAI, ai)} saving={saving.ai} disabled={!aiKeyEntered} />
-        </div>
-      )}
+          );
+        };
+
+        return (
+          <div className="section-card">
+            <div className="section-title mb1">ai models</div>
+            <div className="section-desc">Each model can use a different provider and API key.</div>
+            <label className="checkbox-row mb4">
+              <input type="checkbox" checked={ai.enable_agentic} onChange={(e) => setAi((a) => ({ ...a, enable_agentic: e.target.checked }))} />
+              <span>Enable agentic pipeline</span>
+              <span className="checkbox-hint">(tool-calling investigation)</span>
+            </label>
+            <ModelSection
+              title="Investigation Model"
+              providerKey="investigation_provider"
+              modelKey="investigation_model"
+              apiKeyKey="investigation_api_key"
+              keyHint="Used for deep root-cause analysis."
+              modelPlaceholder={ai.investigation_provider === 'bedrock' ? 'anthropic.claude-opus-4-6-v1:0' : 'claude-opus-4-6'}
+            />
+            <ModelSection
+              title="Triage Model"
+              providerKey="triage_provider"
+              modelKey="triage_model"
+              apiKeyKey="triage_api_key"
+              keyHint="Used for fast error classification."
+              modelPlaceholder={ai.triage_provider === 'bedrock' ? 'anthropic.claude-sonnet-4-6-v1:0' : 'claude-sonnet-4-6'}
+            />
+            <SaveRow onSave={() => save('ai', saveAI, ai)} saving={saving.ai} disabled={!aiKeyEntered} />
+          </div>
+        );
+      })()}
 
       {/* ── JIRA ── */}
       {tab === 'jira' && (

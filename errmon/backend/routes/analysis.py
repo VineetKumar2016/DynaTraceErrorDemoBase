@@ -3,7 +3,6 @@ from fastapi.responses import StreamingResponse
 from models import AnalyzeRequest, ApproveRequest, ReviseRequest
 from ai_service import analyze_error_stream, create_github_pr, create_jira_ticket, get_error_by_id
 from database import db
-from bson import ObjectId
 from datetime import datetime, timezone
 import json
 
@@ -21,10 +20,7 @@ async def start_analysis(req: AnalyzeRequest):
 @router.post("/approve")
 async def approve_fix(req: ApproveRequest):
     """Approve a fix, create GitHub PR and Jira ticket"""
-    try:
-        fix = await db.fixes.find_one({"_id": ObjectId(req.fix_id)})
-    except:
-        fix = await db.fixes.find_one({"_id": req.fix_id})
+    fix = await db.fixes.find_one({"_id": req.fix_id})
     
     if not fix:
         raise HTTPException(404, "Fix not found")
@@ -65,32 +61,23 @@ async def approve_fix(req: ApproveRequest):
             update["jira_status"] = f"failed: {jira_result.get('error', '')}"
     
     # Update fix and error status
-    try:
-        await db.fixes.update_one({"_id": ObjectId(req.fix_id)}, {"$set": update})
-        await db.errors.update_one({"_id": ObjectId(fix["error_id"])}, {"$set": {"status": "pr_created" if update.get("pr_status") == "created" else "approved"}})
-    except:
-        await db.fixes.update_one({"_id": req.fix_id}, {"$set": update})
+    await db.fixes.update_one({"_id": req.fix_id}, {"$set": update})
+    await db.errors.update_one({"_id": fix["error_id"]}, {"$set": {"status": "pr_created" if update.get("pr_status") == "created" else "approved"}})
     
     return results
 
 @router.post("/reject")
 async def reject_fix(data: dict):
     fix_id = data.get("fix_id")
-    try:
-        await db.fixes.update_one({"_id": ObjectId(fix_id)}, {"$set": {"status": "rejected", "updated_at": datetime.now(timezone.utc).isoformat()}})
-        fix = await db.fixes.find_one({"_id": ObjectId(fix_id)})
-        if fix:
-            await db.errors.update_one({"_id": ObjectId(fix["error_id"])}, {"$set": {"status": "rejected"}})
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    await db.fixes.update_one({"_id": fix_id}, {"$set": {"status": "rejected", "updated_at": datetime.now(timezone.utc).isoformat()}})
+    fix = await db.fixes.find_one({"_id": fix_id})
+    if fix:
+        await db.errors.update_one({"_id": fix["error_id"]}, {"$set": {"status": "rejected"}})
     return {"success": True}
 
 @router.get("/fix/{fix_id}")
 async def get_fix(fix_id: str):
-    try:
-        doc = await db.fixes.find_one({"_id": ObjectId(fix_id)})
-    except:
-        doc = await db.fixes.find_one({"_id": fix_id})
+    doc = await db.fixes.find_one({"_id": fix_id})
     if not doc:
         raise HTTPException(404, "Fix not found")
     doc["id"] = str(doc.pop("_id"))

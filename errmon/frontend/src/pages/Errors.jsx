@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getErrors, getErrorStats, deleteError } from '../api';
+import { getErrors, getErrorStats, deleteError, getSettings, fetchFromDynatrace, getIngestStatus } from '../api';
 import { Badge, Spinner, EmptyState, timeAgo, useToast, Toast } from '../ui';
 
 export default function Errors({ onViewError }) {
@@ -7,19 +7,40 @@ export default function Errors({ onViewError }) {
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
   const [classification, setClassification] = useState('');
-  const [repo, setRepo] = useState('monitored');
+  const [repo, setRepo] = useState('');
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('last_seen');
   const [sortDir, setSortDir] = useState(-1);
   const [page, setPage] = useState(1);
   const [classifications, setClassifications] = useState([]);
+  const [enabledRepos, setEnabledRepos] = useState([]);
+  const [dtReady, setDtReady] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncFrom, setSyncFrom] = useState('now-1h');
   const toast = useToast();
 
   useEffect(() => {
     getErrorStats().then((s) => {
       if (s.by_classification) setClassifications(Object.keys(s.by_classification).sort());
     }).catch(() => {});
+    getSettings().then((s) => {
+      setEnabledRepos(s?.github?.enabled_repos || []);
+    }).catch(() => {});
+    getIngestStatus().then((s) => setDtReady(s?.ready || false)).catch(() => {});
   }, []);
+
+  const handleSyncDynatrace = async () => {
+    setSyncing(true);
+    try {
+      const r = await fetchFromDynatrace({ from_time: syncFrom });
+      toast.success(`${r.inserted} new errors synced from Dynatrace (${r.skipped} duplicates skipped)`);
+      load();
+    } catch (e) {
+      toast.error(`Dynatrace sync failed: ${e.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const load = useCallback(() => {
     setLoading(true);
@@ -78,8 +99,12 @@ export default function Errors({ onViewError }) {
         </select>
 
         <select className="filter-select" value={repo} onChange={(e) => { setRepo(e.target.value); setPage(1); }}>
-          <option value="monitored">monitored repos</option>
-          <option value="all">all repos</option>
+          <option value="">all errors</option>
+          <option value="monitored">monitored repos only</option>
+          {enabledRepos.length > 0 && <option disabled>──────────</option>}
+          {enabledRepos.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
         </select>
 
         <input
@@ -92,6 +117,31 @@ export default function Errors({ onViewError }) {
         <span style={{ marginLeft: 'auto', fontSize: '.62rem', color: 'var(--text3)', letterSpacing: '.06em' }}>
           {data.total} ERRORS
         </span>
+
+        {dtReady && (
+          <div className="flex ic g2" style={{ marginLeft: '1rem' }}>
+            <select
+              className="filter-select"
+              value={syncFrom}
+              onChange={(e) => setSyncFrom(e.target.value)}
+              title="Fetch logs from this time window"
+            >
+              <option value="now-15m">last 15 min</option>
+              <option value="now-1h">last 1 hour</option>
+              <option value="now-6h">last 6 hours</option>
+              <option value="now-24h">last 24 hours</option>
+              <option value="now-7d">last 7 days</option>
+            </select>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={handleSyncDynatrace}
+              disabled={syncing}
+              title="Fetch error logs from Dynatrace and add to this list"
+            >
+              {syncing ? <Spinner size={12} /> : '⬇ Dynatrace'}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ padding: 0 }}>
@@ -118,6 +168,14 @@ export default function Errors({ onViewError }) {
                   <tr key={e.id} className="clickable" onClick={() => onViewError(e)}>
                     <td>
                       <span style={{ color: 'var(--text)', fontWeight: 500 }}>{e.service}</span>
+                      {e.source === 'dynatrace' && (
+                        <span style={{
+                          marginLeft: 5, fontSize: '.58rem', fontWeight: 700, letterSpacing: '.04em',
+                          background: 'color-mix(in srgb,#1a73e8 15%,var(--bg2))',
+                          color: '#1a73e8', border: '1px solid color-mix(in srgb,#1a73e8 30%,var(--bg2))',
+                          borderRadius: 4, padding: '1px 5px', verticalAlign: 'middle',
+                        }}>DT</span>
+                      )}
                     </td>
                     <td>
                       <code style={{ fontSize: '.7rem', color: 'var(--text)' }}>{e.error_type}</code>{' '}

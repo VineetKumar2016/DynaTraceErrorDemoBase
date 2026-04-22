@@ -58,8 +58,12 @@ async def get_all_settings():
         result["dynatrace"]["api_token"] = "•••••••••"
     if result.get("jira", {}).get("token"):
         result["jira"]["token"] = "••••••••••"
-    if result.get("ai", {}).get("api_key") and result["ai"]["api_key"] not in ("", None):
-        result["ai"]["api_key"] = "sk-ant-••••••"
+    for field, mask in [
+        ("investigation_api_key", "sk-••••••"),
+        ("triage_api_key",        "sk-••••••"),
+    ]:
+        if result.get("ai", {}).get(field):
+            result["ai"][field] = mask
     return result
 
 @router.post("/github")
@@ -93,8 +97,10 @@ async def save_jira(data: dict):
 @router.post("/ai")
 async def save_ai(data: dict):
     existing = await get_setting("ai", {})
-    if not data.get("api_key") or data.get("api_key", "").startswith("sk-ant-•"):
-        data["api_key"] = existing.get("api_key", "")
+    for field in ("investigation_api_key", "triage_api_key"):
+        v = data.get(field, "")
+        if not v or v.startswith("sk-•"):
+            data[field] = existing.get(field, "")
     await save_setting("ai", data)
     return {"success": True}
 
@@ -127,6 +133,57 @@ async def test_github(data: dict = {}):
                 raise HTTPException(400, f"GitHub returned {r.status_code}: {r.text}")
     except httpx.TimeoutException:
         raise HTTPException(408, "Connection timed out")
+
+@router.post("/dynatrace/generate-token")
+async def dynatrace_generate_token(data: dict):
+    """
+    Use a Dynatrace PAT (admin API token) to create a scoped platform/API token
+    for errmon and return it so the UI can populate the platform_token field.
+
+    The PAT must have the `apiTokens.write` scope.
+    """
+    pat = data.get("pat", "")
+    env_url = data.get("environment_url", "").rstrip("/")
+    if not pat or not env_url:
+        raise HTTPException(400, "pat and environment_url are required")
+
+    headers = {
+        "Authorization": f"Api-Token {pat}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "name": "errmon-auto",
+        "scopes": [
+            "logs.ingest",
+            "logs.read",
+            "metrics.read",
+            "entities.read",
+            "problems.read",
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(f"{env_url}/api/v2/apiTokens", headers=headers, json=payload)
+
+        if r.status_code == 201:
+            token = r.json().get("token", "")
+            return {"success": True, "token": token, "generated": True}
+        elif r.status_code in (401, 403):
+            raise HTTPException(401, "Token rejected — ensure it has the apiTokens.write scope")
+        elif r.status_code == 400:
+            detail = r.json().get("error", {}).get("message", r.text[:200])
+            # PATs cannot create classic API tokens — use the PAT itself as the platform token
+            if "personal access token" in detail.lower():
+                return {"success": True, "token": pat, "generated": False,
+                        "note": "PAT used directly as platform token (PATs cannot create classic API tokens)"}
+            raise HTTPException(400, f"Dynatrace error: {detail}")
+        else:
+            raise HTTPException(502, f"Dynatrace returned {r.status_code}: {r.text[:200]}")
+    except httpx.TimeoutException:
+        raise HTTPException(408, "Connection timed out")
+
 
 @router.post("/test/dynatrace")
 async def test_dynatrace(data: dict = {}):
@@ -235,9 +292,12 @@ async def get_github_repos():
                 page += 1
     except Exception as e:
         return {"repos": [], "error": str(e)}
-    # Filter repos to only show those with "Clone_Demo_Repo" in the name
+    enabled = gh.get("enabled_repos", [])
     filtered_repos = [r for r in repos if "Clone_Demo_Repo" in r["name"] or "Clone_Demo_Repo" in r["full_name"]]
     enabled = gh.get("enabled_repos", [])
     for r in filtered_repos:
         r["enabled"] = r["name"] in enabled
     return {"repos": filtered_repos, "total": len(filtered_repos)}
+    # for r in repos:
+    #     r["enabled"] = r["name"] in enabled
+    # return {"repos": repos, "total": len(repos)}

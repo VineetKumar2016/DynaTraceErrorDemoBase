@@ -9,7 +9,7 @@ An AI-powered developer assistant that monitors production errors from **Dynatra
 ### Prerequisites
 - **Python 3.10+** — https://python.org
 - **Node.js 18+** — https://nodejs.org
-- **MongoDB** (optional) — https://mongodb.com/try/download/community — falls back to in-memory store if not available
+- **No database required** — data is stored in `backend/data.json` automatically
 
 ### macOS / Linux
 ```bash
@@ -116,7 +116,7 @@ errmon/
 ├── start.bat             # Windows one-click start
 ├── backend/
 │   ├── main.py           # FastAPI app + polling scheduler
-│   ├── database.py       # MongoDB client + in-memory fallback
+│   ├── database.py       # JSON file-backed database (data.json)
 │   ├── models.py         # Pydantic data models
 │   ├── dynatrace_service.py  # Dynatrace Grail API integration
 │   ├── ai_service.py     # Claude API + GitHub PR + Jira ticket creation
@@ -153,8 +153,6 @@ errmon/
 Copy `backend/.env.example` to `backend/.env`:
 
 ```env
-MONGO_URL=mongodb://localhost:27017
-DB_NAME=errmon
 HOST=0.0.0.0
 PORT=8000
 ```

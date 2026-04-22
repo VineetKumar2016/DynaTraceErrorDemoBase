@@ -31,6 +31,8 @@ export const getFixes = (params = {}) => {
 };
 export const getFix = (id) => req(`/fixes/${id}`);
 export const getFixByError = (errorId) => req(`/fixes/by-error/${errorId}`);
+export const generateFix = (data) =>
+  req("/fixes/generate", { method: "POST", body: JSON.stringify(data) });
 
 // PRs
 export const getPRs = () => req('/prs/');
@@ -53,9 +55,21 @@ export const saveAI = (data) => req('/settings/ai', { method: 'POST', body: JSON
 export const savePipeline = (data) => req('/settings/pipeline', { method: 'POST', body: JSON.stringify(data) });
 export const testGitHub = (data = {}) => req('/settings/test/github', { method: 'POST', body: JSON.stringify(data) });
 export const testDynatrace = (data = {}) => req('/settings/test/dynatrace', { method: 'POST', body: JSON.stringify(data) });
+export const generateDynatraceToken = (data) =>
+  req("/settings/dynatrace/generate-token", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
 export const testJira = (data = {}) => req('/settings/test/jira', { method: 'POST', body: JSON.stringify(data) });
 export const getGitHubRepos = () => req('/settings/github/repos');
 export const updateRepoEnabled = (data) => req('/settings/github', { method: 'POST', body: JSON.stringify(data) });
+
+// Dynatrace ingest
+export const fetchFromDynatrace = (params = {}) => {
+  const q = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v)));
+  return req(`/ingest/from-dynatrace${q.toString() ? '?' + q : ''}`);
+};
+export const getIngestStatus = () => req('/ingest/status');
 
 // Upload errors file
 export async function uploadErrorsFile(file) {

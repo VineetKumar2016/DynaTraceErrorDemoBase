@@ -38,7 +38,7 @@ async def init_db():
 
 
 class FileDB:
-    """Persistent JSON file-backed database. Replaces MongoDB."""
+    """Persistent JSON file-backed database."""
 
     def __init__(self, path: Path):
         self._path = path

@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Query, HTTPException, UploadFile, File
 from typing import Optional, List
 from datetime import datetime, timezone
-from bson import ObjectId
 import json, csv, io, hashlib, re
 from database import db
 
@@ -16,6 +15,9 @@ _NGINX_PID_RE = re.compile(r'^\d+#\d+:\s+\*?\d*\s*')
 _EXCEPTION_RE = re.compile(r'([A-Z][a-zA-Z0-9_]*(?:Exception|Error|Fault|Panic|Failure))')
 _FUNC_ERR_RE  = re.compile(r'([A-Z][a-zA-Z0-9_]+\(\)).*?failed', re.IGNORECASE)
 _DYN_RE       = re.compile(r'\*\d+\s*|:\d+$|\s+\d{1,5}#\d+:')  # strip dynamic IDs for fingerprint
+_NGINX_CODE_RE = re.compile(r'\((\d+):[^)]+\)')                  # nginx error code e.g. (123: ...)
+_NGINX_HOST_RE = re.compile(r'host:\s*"([^"]+)"')                # nginx host field
+_NGINX_REQ_RE  = re.compile(r'request:\s*"([^"]+)"')             # nginx request field
 
 def parse_log_lines(text: str) -> list:
     """Parse a plain-text log file (nginx, app server, etc.) into error records."""
@@ -28,6 +30,22 @@ def parse_log_lines(text: str) -> list:
         if not line.strip():
             continue
 
+        # Collect continuation lines (stack traces, indented context, or nginx line-wrapped continuations)
+        block = [line]
+        while i < len(lines):
+            nxt = lines[i]
+            if nxt and (nxt[0] in ('\t', ' ')
+                        or nxt.lstrip().startswith('at ')
+                        or nxt.lstrip().startswith('--- ')
+                        # nginx wraps long lines: continuation has no timestamp or [level]
+                        or (not _TS_RE.match(nxt) and not _LEVEL_RE.search(nxt) and not nxt[0].isdigit())):
+                block.append(nxt.rstrip())
+                i += 1
+            else:
+                break
+
+        full = '\n'.join(block)
+
         # Determine log level from [level] tag
         level_match = _LEVEL_RE.search(line)
         level = level_match.group(1).lower() if level_match else ''
@@ -35,20 +53,8 @@ def parse_log_lines(text: str) -> list:
         if level in _SKIP_LEVELS:
             continue
         # Keep if error level OR line contains an exception class name
-        if level not in _ERROR_LEVELS and not _EXCEPTION_RE.search(line):
+        if level not in _ERROR_LEVELS and not _EXCEPTION_RE.search(full):
             continue
-
-        # Collect continuation lines (stack traces, indented context)
-        block = [line]
-        while i < len(lines):
-            nxt = lines[i]
-            if nxt and (nxt[0] in ('\t', ' ') or nxt.lstrip().startswith('at ') or nxt.lstrip().startswith('--- ')):
-                block.append(nxt.rstrip())
-                i += 1
-            else:
-                break
-
-        full = '\n'.join(block)
 
         # Build clean message: strip timestamp, [level], nginx pid#tid:*N
         msg = line
@@ -57,6 +63,21 @@ def parse_log_lines(text: str) -> list:
         msg = _NGINX_PID_RE.sub('', msg)
         msg = msg.strip(' \t-–:')
 
+        # Append continuation content to message so full context is visible
+        if len(block) > 1:
+            msg = msg + ' ' + ' '.join(block[1:])
+        msg = msg[:500]
+
+        # Extract nginx-specific fields for better service labelling and fingerprinting
+        host_m = _NGINX_HOST_RE.search(full)
+        req_m  = _NGINX_REQ_RE.search(full)
+        service = host_m.group(1) if host_m else 'unknown-service'
+        request_path = req_m.group(1).split(' ')[1] if req_m else ''
+
+        # Extract nginx error code for distinct fingerprinting (e.g. 123, 10013)
+        code_m = _NGINX_CODE_RE.search(full)
+        error_code = code_m.group(1) if code_m else ''
+
         # Determine error_type
         exc = _EXCEPTION_RE.search(full)
         if exc:
@@ -64,18 +85,22 @@ def parse_log_lines(text: str) -> list:
         else:
             func = _FUNC_ERR_RE.search(msg)
             if func:
-                error_type = func.group(1).rstrip('()') + 'Error'
+                base = func.group(1).rstrip('()') + 'Error'
+                error_type = f"{base}_{error_code}" if error_code else base
             else:
-                error_type = (level.capitalize() + 'Error') if level else 'LogError'
+                base = (level.capitalize() + 'Error') if level else 'LogError'
+                error_type = f"{base}_{error_code}" if error_code else base
 
-        # Normalize message for fingerprint (strip dynamic connection IDs, line numbers)
+        # Normalize message for fingerprint — include request path to differentiate similar errors
         fp_msg = _DYN_RE.sub(' ', msg).strip()
+        if request_path:
+            fp_msg = f"{fp_msg} {request_path}"
 
         records.append({
             'error_type': error_type,
-            'message': msg[:500],
+            'message': msg,
             '_fp_msg': fp_msg,   # used for dedup, not stored
-            'service': 'unknown-service',
+            'service': service,
             'classification': level or 'log_error',
             'raw_log': full,
         })
@@ -136,20 +161,14 @@ async def list_errors(
 
 @router.get("/{error_id}")
 async def get_error(error_id: str):
-    try:
-        doc = await db.errors.find_one({"_id": ObjectId(error_id)})
-    except:
-        doc = await db.errors.find_one({"_id": error_id})
+    doc = await db.errors.find_one({"_id": error_id})
     if not doc:
         raise HTTPException(404, "Error not found")
     return serialize(doc)
 
 @router.delete("/{error_id}")
 async def delete_error(error_id: str):
-    try:
-        await db.errors.delete_one({"_id": ObjectId(error_id)})
-    except:
-        await db.errors.delete_one({"_id": error_id})
+    await db.errors.delete_one({"_id": error_id})
     return {"success": True}
 
 @router.post("/upload")
@@ -206,6 +225,7 @@ async def upload_errors(file: UploadFile = File(...)):
     inserted = 0
     skipped = 0
     now = datetime.now(timezone.utc)
+    seen_fps = set()  # track within-batch fingerprints to avoid redundant DB inserts
 
     for row in records:
         # Normalize field names (support snake_case and camelCase variants)
@@ -228,9 +248,13 @@ async def upload_errors(file: UploadFile = File(...)):
         fp_raw = f"{error_type}:{fp_msg_key}:{service}".encode()
         fingerprint = hashlib.sha256(fp_raw).hexdigest()[:16]
 
+        if fingerprint in seen_fps:
+            skipped += 1
+            continue
         existing = await db.errors.find_one({"fingerprint": fingerprint})
         if existing:
             skipped += 1
+            seen_fps.add(fingerprint)
             continue
 
         raw_log_entry = row.get("raw_log")
@@ -252,6 +276,7 @@ async def upload_errors(file: UploadFile = File(...)):
             doc["repo"] = repo
 
         await db.errors.insert_one(doc)
+        seen_fps.add(fingerprint)
         inserted += 1
 
     return {"inserted": inserted, "skipped": skipped, "total": len(records)}

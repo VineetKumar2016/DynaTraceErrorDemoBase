@@ -7,7 +7,7 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'utils')))
 
 
-api_key = "AIzaSyA9Qs-5yoy1xBcAE75UwnW-g7ZfD0bbZWM"
+api_key = ""
 
 class GenAIRequestModel:
     def __init__(self, image=None, prompt: str = "", repo_name: str = "", error_message: str = ""):

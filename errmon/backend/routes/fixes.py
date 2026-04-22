@@ -44,6 +44,7 @@ async def generate_fix(request: GenerateFixRequest):
     """Generate a fix using AI based on repository name, error message, and prompt."""
     try:
         from ai_service import generate_fix as ai_generate_fix
+        import re
         
         # Call AI service to generate fix
         fix_response = await ai_generate_fix(
@@ -52,12 +53,38 @@ async def generate_fix(request: GenerateFixRequest):
             prompt=request.prompt
         )
         
+        # Parse PR information from the response using regex
+        pr_info = {}
+        if "PR URL:" in fix_response:
+            # Extract PR URL
+            match = re.search(r'PR URL:\s*(.+?)(?:\n|$)', fix_response)
+            if match:
+                pr_info["pr_url"] = match.group(1).strip()
+            
+            # Extract PR Number
+            match = re.search(r'PR Number:\s*(.+?)(?:\n|$)', fix_response)
+            if match:
+                pr_info["pr_number"] = match.group(1).strip()
+            
+            # Extract Branch Name
+            match = re.search(r'Branch Name:\s*(.+?)(?:\n|$)', fix_response)
+            if match:
+                pr_info["branch_name"] = match.group(1).strip()
+            
+            # Extract PR Status
+            match = re.search(r'PR Status:\s*(.+?)(?:\n|$)', fix_response)
+            if match:
+                pr_info["status"] = match.group(1).strip()
+        
         return {
             "success": True,
             "repo_name": request.repo_name,
             "error_message": request.error_message,
             "fix": fix_response,
+            "pr_info": pr_info,
             "generated_at": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
+        import logging
+        logging.error(f"Error in generate_fix route: {e}")
         raise HTTPException(500, f"Error generating fix: {str(e)}")

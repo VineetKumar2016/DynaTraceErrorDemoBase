@@ -133,7 +133,20 @@ export default function Settings() {
       };
       
       const response = await generateFix(fixData);
-      toast.success('Fix generation initiated! Check the fix details below.');
+      
+      // Display PR information if available
+      if (response.pr_info && response.pr_info.pr_url) {
+        toast.success(`✓ Fix generated successfully! PR created: ${response.pr_info.pr_number}`);
+        toast.info(`Branch: ${response.pr_info.branch_name || 'new-fixex'}`);
+        console.log('PR Details:', response.pr_info);
+        // Optionally open the PR in a new tab
+        setTimeout(() => {
+          window.open(response.pr_info.pr_url, '_blank');
+        }, 1000);
+      } else {
+        toast.success('Fix generation initiated! Check the fix details below.');
+      }
+      
       console.log('Generated fix:', response);
     } catch (e) {
       toast.error(`Failed to generate fix: ${e.message}`);

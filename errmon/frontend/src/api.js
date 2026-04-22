@@ -110,7 +110,10 @@ export function streamAnalysis(errorId, onEvent) {
       buffer = lines.pop();
       for (const line of lines) {
         if (line.startsWith('data: ')) {
-          try { onEvent(JSON.parse(line.slice(6))); } catch {}
+          try { onEvent(JSON.parse(line.slice(6))); } catch (e) {
+            // Silently ignore JSON parse errors in streamed data
+            console.debug('Failed to parse SSE data:', e);
+          }
         }
       }
     }

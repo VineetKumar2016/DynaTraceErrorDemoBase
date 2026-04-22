@@ -129,7 +129,7 @@ export default function Settings() {
       const fixData = {
         repo_name: 'Clone_Demo_Repo',
         error_message: 'plugin:vite:oxc] Transform failed with 3 errors: in src/App.jsx',
-        prompt: 'create a branch from the main branch of provided repository, fix the issue mentioned in the error message and push the branch in git. After this raise the PR pointing to main branch. Newly created branch and PR should be visible in Git.'
+        prompt: '1. create a branch from the main branch of provided repository. 2. fix the issue mentioned in the error message 3. push the branch in git. 4. After this raise the PR pointing to main branch. 5. Newly created branch and PR should be visible in Git.'
       };
       
       const response = await generateFix(fixData);

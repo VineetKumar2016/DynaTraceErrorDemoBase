@@ -424,17 +424,19 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
         gh_token = gh_config.get("token", "")
         gh_org = gh_config.get("org", "")
 
-        gh_token = ""
-        gh_org = ""
-
-        
         if not gh_token or not gh_org:
             return f"Error: GitHub token or organization not configured. Please configure GitHub settings first."
         
         from GeminiUtils import GenAIClient
         
+        # Get AI config from settings
+        ai_config = await get_ai_config()
+        api_key = ai_config.get("api_key", "")
+        
+        if not api_key:
+            return f"Error: AI API key not configured. Please configure AI settings first."
+        
         # Step 1: Generate AI fix response
-        api_key = "AIzaSyA9Qs-5yoy1xBcAE75UwnW-g7ZfD0bbZWM"
         client = GenAIClient(api_key=api_key)
         
         fix_response = client.generate_fix(
@@ -450,8 +452,10 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
         # Create temporary directory for cloning
         temp_dir = tempfile.mkdtemp(prefix="fix_")
         try:
-            repo_url = f"https://{gh_token}@github.com/{gh_org}/{repo_name}.git"
-        
+             # repo_url = f"https://{gh_token}@github.com/{gh_org}/{repo_name}.git"
+            # repo_url = "https://github.com/VineetKumar2016/Clone_Demo_Repo.git"
+            repo_url = "git@github.com:VineetKumar2016/Clone_Demo_Repo.git"
+
             repo_path = os.path.join(temp_dir, repo_name)
             print(f"Cloning repository {repo_url} into {repo_path}...")
             
@@ -488,7 +492,9 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
             )
             
             # Create new branch from main
+            timestamp = datetime.now().strftime("%y%m%d-%H%M")
             branch_name = "new-fixex"
+            branch_name = f"{branch_name}-{timestamp}"
             logging.info(f"Creating branch: {branch_name}")
             subprocess.run(
                 ["git", "checkout", "-b", branch_name, "origin/main"],

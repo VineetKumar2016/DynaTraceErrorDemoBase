@@ -8,128 +8,33 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, AsyncGenerator
 from database import db
 import constants
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
 
 async def get_ai_config():
+    logger.info(f"get_ai_config :: Fetching AI config from database")
     doc = await db.settings.find_one({"key": "ai"})
     return doc.get("value", {}) if doc else {}
 
 async def get_github_config():
+    logger.info(f"get_github_config :: Fetching GitHub config from database")
     doc = await db.settings.find_one({"key": "github"})
     return doc.get("value", {}) if doc else {}
 
 async def get_error_by_id(error_id: str) -> Optional[Dict]:
+    logger.info(f"get_error_by_id :: Fetching error by ID: {error_id}")
     return await db.errors.find_one({"_id": error_id})
-
-async def get_repo_files(repo_full_name: str, token: str, error_context: str) -> Dict[str, str]:
-    """Fetch relevant source files from GitHub based on error context"""
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-    files = {}
-    
-    # Extract class/file hints from error
-    class_match = re.findall(r'(\w+(?:Service|Controller|Handler|Repository|Manager|Helper))', error_context)
-    
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            # Get repo tree
-            r = await client.get(
-                f"https://api.github.com/repos/{repo_full_name}/git/trees/HEAD?recursive=1",
-                headers=headers
-            )
-            if r.status_code != 200:
-                return files
-            
-            tree = r.json().get("tree", [])
-            # Filter relevant files
-            relevant = []
-            for item in tree:
-                if item.get("type") == "blob":
-                    path = item["path"]
-                    if any(cls.lower() in path.lower() for cls in class_match):
-                        relevant.append(path)
-                    elif path.endswith((".cs", ".ts", ".py", ".js")) and len(relevant) < 5:
-                        relevant.append(path)
-            
-            # Fetch up to 3 files
-            for path in relevant[:3]:
-                fr = await client.get(
-                    f"https://api.github.com/repos/{repo_full_name}/contents/{path}",
-                    headers=headers
-                )
-                if fr.status_code == 200:
-                    import base64
-                    content_data = fr.json()
-                    if content_data.get("encoding") == "base64":
-                        content = base64.b64decode(content_data["content"]).decode("utf-8", errors="ignore")
-                        files[path] = content[:3000]  # Limit content
-    except Exception as e:
-        print(f"GitHub fetch error: {e}")
-    
-    return files
-
-async def call_ai(provider: str, model: str, api_key: str, system_prompt: str, user_prompt: str) -> Dict:
-    """Call the configured AI provider and return parsed result dict."""
-    async with httpx.AsyncClient(timeout=60) as client:
-        if provider == "anthropic":
-            r = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": model, "max_tokens": 2000, "system": system_prompt, "messages": [{"role": "user", "content": user_prompt}]}
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:200]}")
-            resp = r.json()
-            text = resp["content"][0]["text"]
-            tokens_in  = resp.get("usage", {}).get("input_tokens", 0)
-            tokens_out = resp.get("usage", {}).get("output_tokens", 0)
-            cost = (tokens_in / 1_000_000 * 3.0) + (tokens_out / 1_000_000 * 15.0)
-
-        elif provider == "openai":
-            r = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "max_tokens": 2000, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]}
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:200]}")
-            resp = r.json()
-            text = resp["choices"][0]["message"]["content"]
-            tokens_in  = resp.get("usage", {}).get("prompt_tokens", 0)
-            tokens_out = resp.get("usage", {}).get("completion_tokens", 0)
-            cost = (tokens_in / 1_000_000 * 2.5) + (tokens_out / 1_000_000 * 10.0)
-
-        elif provider == "google":
-            # Use Google's OpenAI-compatible endpoint (Gemini)
-            r = await client.post(
-                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "max_tokens": 2000, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]}
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"Google {r.status_code}: {r.text[:200]}")
-            resp = r.json()
-            text = resp["choices"][0]["message"]["content"]
-            tokens_in  = resp.get("usage", {}).get("prompt_tokens", 0)
-            tokens_out = resp.get("usage", {}).get("completion_tokens", 0)
-            # Gemini pricing varies by model; use conservative estimate
-            cost = (tokens_in / 1_000_000 * 1.25) + (tokens_out / 1_000_000 * 5.0)
-
-        else:
-            raise RuntimeError(f"Unsupported provider: {provider}")
-
-    # Strip markdown fences if present
-    json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-    raw = json_match.group(1) if json_match else text
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        result = {"rca": text[:500], "explanation": text[500:1000] if len(text) > 500 else "",
-                  "severity": "medium", "proposed_changes": [], "testing_notes": "Review manually."}
-    result.update({"tokens_in": tokens_in, "tokens_out": tokens_out, "cost_usd": round(cost, 4)})
-    return result
-
 
 async def analyze_error_stream(error_id: str) -> AsyncGenerator[str, None]:
     """Stream AI analysis of an error, yielding SSE-formatted events"""
+    logger.info(f"analyze_error_stream :: error_id: {error_id}")
 
     ai_config = await get_ai_config()
     provider  = ai_config.get("investigation_provider", "anthropic")
@@ -285,134 +190,10 @@ Provide a thorough root cause analysis and fix."""
         await db.errors.update_one({"_id": error_id}, {"$set": {"status": "new"}})
         yield f"data: {json.dumps({'type': 'error', 'message': 'Analysis failed'})}\n\n"
 
-async def create_github_pr(fix: Dict, error: Dict, gh_config: Dict) -> Dict:
-    """Create a real GitHub PR for the fix"""
-    token = gh_config.get("token", "")
-    org = gh_config.get("org", "")
-    repo = error.get("repo", "")
-    
-    if not token or not org or not repo:
-        return {"success": False, "error": "GitHub not configured"}
-    
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "Content-Type": "application/json"}
-    repo_full = f"{org}/{repo}"
-    
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Get default branch
-        r = await client.get(f"https://api.github.com/repos/{repo_full}", headers=headers)
-        if r.status_code != 200:
-            return {"success": False, "error": f"Cannot access repo: {r.status_code}"}
-        
-        default_branch = r.json().get("default_branch", "main")
-        
-        # Get latest commit SHA
-        r2 = await client.get(f"https://api.github.com/repos/{repo_full}/git/ref/heads/{default_branch}", headers=headers)
-        if r2.status_code != 200:
-            return {"success": False, "error": "Cannot get branch SHA"}
-        
-        sha = r2.json()["object"]["sha"]
-        
-        # Create branch
-        branch_name = f"fix/ai-errmon-{fix.get('_id', 'fix')}"
-        r3 = await client.post(f"https://api.github.com/repos/{repo_full}/git/refs", 
-            headers=headers, json={"ref": f"refs/heads/{branch_name}", "sha": sha})
-        if r3.status_code not in (201, 422):  # 422 = branch exists
-            return {"success": False, "error": f"Cannot create branch: {r3.status_code}"}
-        
-        # Create PR
-        pr_body = f"""## AI-Generated Fix
-
-**Root Cause:** {fix.get('rca', '')[:500]}
-
-**Explanation:** {fix.get('explanation', '')[:500]}
-
-**Testing Notes:**
-{fix.get('testing_notes', '')}
-
----
-*Generated by AI Error Monitor | Model: {fix.get('model', 'claude')} | Cost: ${fix.get('cost_usd', 0):.4f}*"""
-        
-        r4 = await client.post(f"https://api.github.com/repos/{repo_full}/pulls", 
-            headers=headers, json={
-                "title": f"fix: AI-generated fix for {error.get('error_type', 'error')} in {repo}",
-                "body": pr_body,
-                "head": branch_name,
-                "base": default_branch
-            })
-        
-        if r4.status_code == 201:
-            pr = r4.json()
-            return {"success": True, "pr_number": pr["number"], "pr_url": pr["html_url"], "branch": branch_name}
-        else:
-            return {"success": False, "error": f"PR creation failed: {r4.status_code} {r4.text[:200]}"}
-
-async def create_jira_ticket(fix: Dict, error: Dict, jira_config: Dict, board_key: str, epic_key: Optional[str] = None) -> Dict:
-    """Create a real Jira ticket"""
-    email = jira_config.get("email", "")
-    token = jira_config.get("token", "")
-    base_url = jira_config.get("base_url", "").rstrip("/")
-    
-    if not email or not token or not base_url:
-        return {"success": False, "error": "Jira not configured"}
-    
-    import base64
-    auth = base64.b64encode(f"{email}:{token}".encode()).decode()
-    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json", "Accept": "application/json"}
-    
-    # Find custom fields from board config
-    boards = jira_config.get("boards", [])
-    board = next((b for b in boards if b.get("key") == board_key), {})
-    custom_fields = {}
-    for f in board.get("custom_fields", []):
-        if f.get("id") and f.get("value"):
-            try:
-                custom_fields[f["id"]] = json.loads(f["value"])
-            except:
-                custom_fields[f["id"]] = f["value"]
-    
-    issue_data = {
-        "fields": {
-            "project": {"key": board_key},
-            "summary": f"[AI Fix] {error.get('error_type', 'Error')} in {error.get('service', 'service')}",
-            "description": {
-                "type": "doc",
-                "version": 1,
-                "content": [{
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": f"Root Cause: {fix.get('rca', '')[:1000]}"}]
-                }]
-            },
-            "issuetype": {"name": "Bug"},
-            **custom_fields
-        }
-    }
-    
-    if epic_key:
-        issue_data["fields"]["parent"] = {"key": epic_key}
-    
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(f"{base_url}/rest/api/3/issue", headers=headers, json=issue_data)
-        if r.status_code == 201:
-            issue = r.json()
-            return {
-                "success": True,
-                "jira_id": issue["key"],
-                "jira_url": f"{base_url}/browse/{issue['key']}"
-            }
-        else:
-            return {"success": False, "error": f"Jira returned {r.status_code}: {r.text[:300]}"}
-
 async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
     """Generate a fix using AI and create a branch with the fix in the repository.
-    
-    Args:
-        repo_name: Name of the repository (e.g., 'Clone_Demo_Repo')
-        error_message: The error message to fix
-        prompt: Custom prompt/instructions for fix generation
-        
-    Returns:
-        Generated fix response and git operations summary
     """
+    logger.info(f"generate_fix :: repo_name: {repo_name}, error_message: {error_message[:100]}..., ")
     try:
         import sys
         import os
@@ -442,15 +223,18 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
         
         # Step 1: Initialize AI client
         client = GenAIClient(api_key=api_key)
-        logging.info(f"Creating fix branch for {repo_name}")
+        logger.info(f"generate_fix :: Creating fix branch for {repo_name}")
         
         # Create temporary directory for cloning
         temp_dir = tempfile.mkdtemp(prefix="fix_")
         try:
             repo_url = constants.GIT_HUB_REPO
             repo_path = os.path.join(temp_dir, repo_name)
-            
-            logging.info(f"Cloning repository: {repo_name}")
+            logger.info(f"generate_fix :: Cloning repository :: temp_dir : {temp_dir}")
+            logger.info(f"generate_fix :: Cloning repository :: repo_url : {repo_url}")
+            logger.info(f"generate_fix :: Cloning repository :: repo_path {repo_path}")
+            logger.info(f"generate_fix :: Cloning repository :: repo_name {repo_name}")
+
             subprocess.run(
                 ["git", "clone", repo_url, repo_path],
                 check=True,
@@ -496,9 +280,9 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
             org_repo = constants.ORG_REPO
             enhanced_prompt = f"""
 You are an expert React/JavaScript engineer.
-Analyze and fix the error in the repository {org_repo + "/" + branch_name}.
+Analyze and fix the error in the branch {org_repo + "/" + branch_name}.
 Repository: {org_repo + "/" + branch_name}
-# Branch Name: {branch_name}
+Branch Name: {branch_name}
 
 Error:
 {error_message}
@@ -511,20 +295,22 @@ Constraints:
 Return 
     ONLY the complete updated file.
 """
-            print("enhanced_prompt ::Generating fix with AI...", enhanced_prompt)
-            # print("REPO :::: Repo name:", repo_name + "/" + branch_name)
-            fix_response = ""
+            logger.info(f"generate_fix :: Generating fix with AI for enhanced_prompt {enhanced_prompt} on branch {branch_name}")
+            # fix_response = ""
             fix_response = client.generate_fix(
                 repo_name=repo_name + "/" + branch_name,
                 error_message=error_message,
                 prompt=enhanced_prompt
             )
 
-            logging.info(f"AI Fix Response RECEIVED:\n{fix_response}")
+            logger.info(f"generate_fix :: AI fix response received\n{fix_response}")
             
             # Step 3: Parse AI response and apply fixes
             ai_analysis = parse_ai_response(fix_response)
-            files_modified = await apply_fixes_to_repo(repo_path, ai_analysis)
+            logger.info(f"generate_fix :: AI fix Analysis received\n{ai_analysis}")
+            
+            files_modified = await apply_fixes_to_repo(repo_path + "/" + branch_name, ai_analysis)
+            logger.info(f"generate_fix :: AI fix files_modified\n{files_modified}")
             
             # Step 4: Create fix summary file
             fix_file_path = os.path.join(repo_path, "AI_FIX_SUMMARY.md")
@@ -539,21 +325,19 @@ Return
 ## Files Modified
 {json.dumps(files_modified, indent=2)}
 
-## Testing Notes
-# {ai_analysis.get('testing_notes', 'Manual testing required')}
+# Testing Notes
+{ai_analysis.get('testing_notes', 'Manual testing required')}
 
 ## Repository
 {repo_name}
 
 ## Raw AI Response
-```json
 {fix_response}
-```
 """
             with open(fix_file_path, 'w') as f:
                 f.write(fix_summary)
             
-            logging.info(f"Created fix summary file")
+            logger.info(f"generate_fix :: Created fix summary file")
             
             # Stage and commit changes
             subprocess.run(
@@ -654,9 +438,8 @@ async def create_github_pr_from_branch(gh_token: str, org: str, repo_name: str,
         org = repo_url.split(":")[1].split("/")[0]
 
         # org = parse_github_url(repo_url).get("user", org)
-        print(f"Parsed org: {org} from repo URL: {repo_url}")
-        # org = "VineetKumar2016"
-
+        logger.info(f"create_github_pr_from_branch :: Parsed org: {org} from repo URL: {repo_url}")
+    
         repo_full = f"{org}/{repo_name}"
         # repo_full = "git@github.com:VineetKumar2016/Clone_Demo_Repo.git"
         
@@ -743,6 +526,7 @@ def parse_ai_response(response: str) -> Dict[str, Any]:
     Returns:
         Dictionary with parsed AI analysis
     """
+    logger.info(f"parse_ai_response :: response: {response}")
     try:
         # Try to extract JSON from response
         if "```json" in response:
@@ -800,7 +584,8 @@ async def apply_fixes_to_repo(repo_path: str, ai_analysis: Dict[str, Any]) -> li
     import logging
     import os
     modified_files = []
-    
+    logger.info(f"apply_fixes_to_repo :: repo_path: {repo_path}, ai_analysis: {ai_analysis}")
+
     proposed_changes = ai_analysis.get("proposed_changes", [])
     
     for change in proposed_changes:
@@ -814,6 +599,7 @@ async def apply_fixes_to_repo(repo_path: str, ai_analysis: Dict[str, Any]) -> li
                 continue
             
             full_path = os.path.join(repo_path, file_path)
+            logger.info(f"apply_fixes_to_repo :: Applying fix to file: {full_path}")
             
             # Check if file exists
             if not os.path.exists(full_path):
@@ -843,42 +629,266 @@ async def apply_fixes_to_repo(repo_path: str, ai_analysis: Dict[str, Any]) -> li
     return modified_files
 
 
-def parse_github_url(url: str) -> dict:
-    """Parse GitHub repo URL and return components.
+# def parse_github_url(url: str) -> dict:
+#     """Parse GitHub repo URL and return components.
     
-    Supports:
-    - git@github.com:user/repo.git
-    - https://github.com/user/repo.git
-    - https://github.com/user/repo
+#     Supports:
+#     - git@github.com:user/repo.git
+#     - https://github.com/user/repo.git
+#     - https://github.com/user/repo
     
-    Args:
-        url: GitHub repository URL
+#     Args:
+#         url: GitHub repository URL
         
-    Returns:
-        Dictionary with protocol, user, repo, and full_name
-    """
-    result = {
-        "protocol": None,
-        "user": None,
-        "repo": None,
-        "full_name": None
-    }
+#     Returns:
+#         Dictionary with protocol, user, repo, and full_name
+#     """
+#     result = {
+#         "protocol": None,
+#         "user": None,
+#         "repo": None,
+#         "full_name": None
+#     }
 
-    # Detect protocol
-    if url.startswith("git@"):
-        result["protocol"] = "ssh"
-    elif url.startswith("http"):
-        result["protocol"] = "https"
+#     # Detect protocol
+#     if url.startswith("git@"):
+#         result["protocol"] = "ssh"
+#     elif url.startswith("http"):
+#         result["protocol"] = "https"
 
-    # Regex to extract user and repo
-    match = re.search(r'github\.com[:/](.*?)/(.*?)(\.git)?$', url)
+#     # Regex to extract user and repo
+#     match = re.search(r'github\.com[:/](.*?)/(.*?)(\.git)?$', url)
 
-    if match:
-        user = match.group(1)
-        repo = match.group(2)
+#     if match:
+#         user = match.group(1)
+#         repo = match.group(2)
 
-        result["user"] = user
-        result["repo"] = repo
-        result["full_name"] = f"{user}/{repo}"
+#         result["user"] = user
+#         result["repo"] = repo
+#         result["full_name"] = f"{user}/{repo}"
 
-    return result
+#     return result
+
+# async def get_repo_files(repo_full_name: str, token: str, error_context: str) -> Dict[str, str]:
+    # """Fetch relevant source files from GitHub based on error context"""
+    # headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    # files = {}
+    
+    # # Extract class/file hints from error
+    # class_match = re.findall(r'(\w+(?:Service|Controller|Handler|Repository|Manager|Helper))', error_context)
+    
+    # try:
+    #     async with httpx.AsyncClient(timeout=15) as client:
+    #         # Get repo tree
+    #         r = await client.get(
+    #             f"https://api.github.com/repos/{repo_full_name}/git/trees/HEAD?recursive=1",
+    #             headers=headers
+    #         )
+    #         if r.status_code != 200:
+    #             return files
+            
+    #         tree = r.json().get("tree", [])
+    #         # Filter relevant files
+    #         relevant = []
+    #         for item in tree:
+    #             if item.get("type") == "blob":
+    #                 path = item["path"]
+    #                 if any(cls.lower() in path.lower() for cls in class_match):
+    #                     relevant.append(path)
+    #                 elif path.endswith((".cs", ".ts", ".py", ".js")) and len(relevant) < 5:
+    #                     relevant.append(path)
+            
+    #         # Fetch up to 3 files
+    #         for path in relevant[:3]:
+    #             fr = await client.get(
+    #                 f"https://api.github.com/repos/{repo_full_name}/contents/{path}",
+    #                 headers=headers
+    #             )
+    #             if fr.status_code == 200:
+    #                 import base64
+    #                 content_data = fr.json()
+    #                 if content_data.get("encoding") == "base64":
+    #                     content = base64.b64decode(content_data["content"]).decode("utf-8", errors="ignore")
+    #                     files[path] = content[:3000]  # Limit content
+    # except Exception as e:
+    #     print(f"GitHub fetch error: {e}")
+    
+    # return files
+
+# async def call_ai(provider: str, model: str, api_key: str, system_prompt: str, user_prompt: str) -> Dict:
+#     """Call the configured AI provider and return parsed result dict."""
+#     async with httpx.AsyncClient(timeout=60) as client:
+#         if provider == "anthropic":
+#             r = await client.post(
+#                 "https://api.anthropic.com/v1/messages",
+#                 headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+#                 json={"model": model, "max_tokens": 2000, "system": system_prompt, "messages": [{"role": "user", "content": user_prompt}]}
+#             )
+#             if r.status_code != 200:
+#                 raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:200]}")
+#             resp = r.json()
+#             text = resp["content"][0]["text"]
+#             tokens_in  = resp.get("usage", {}).get("input_tokens", 0)
+#             tokens_out = resp.get("usage", {}).get("output_tokens", 0)
+#             cost = (tokens_in / 1_000_000 * 3.0) + (tokens_out / 1_000_000 * 15.0)
+
+#         elif provider == "openai":
+#             r = await client.post(
+#                 "https://api.openai.com/v1/chat/completions",
+#                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+#                 json={"model": model, "max_tokens": 2000, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]}
+#             )
+#             if r.status_code != 200:
+#                 raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:200]}")
+#             resp = r.json()
+#             text = resp["choices"][0]["message"]["content"]
+#             tokens_in  = resp.get("usage", {}).get("prompt_tokens", 0)
+#             tokens_out = resp.get("usage", {}).get("completion_tokens", 0)
+#             cost = (tokens_in / 1_000_000 * 2.5) + (tokens_out / 1_000_000 * 10.0)
+
+#         elif provider == "google":
+#             # Use Google's OpenAI-compatible endpoint (Gemini)
+#             r = await client.post(
+#                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+#                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+#                 json={"model": model, "max_tokens": 2000, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]}
+#             )
+#             if r.status_code != 200:
+#                 raise RuntimeError(f"Google {r.status_code}: {r.text[:200]}")
+#             resp = r.json()
+#             text = resp["choices"][0]["message"]["content"]
+#             tokens_in  = resp.get("usage", {}).get("prompt_tokens", 0)
+#             tokens_out = resp.get("usage", {}).get("completion_tokens", 0)
+#             # Gemini pricing varies by model; use conservative estimate
+#             cost = (tokens_in / 1_000_000 * 1.25) + (tokens_out / 1_000_000 * 5.0)
+
+#         else:
+#             raise RuntimeError(f"Unsupported provider: {provider}")
+
+#     # Strip markdown fences if present
+#     json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+#     raw = json_match.group(1) if json_match else text
+#     try:
+#         result = json.loads(raw)
+#     except json.JSONDecodeError:
+#         result = {"rca": text[:500], "explanation": text[500:1000] if len(text) > 500 else "",
+#                   "severity": "medium", "proposed_changes": [], "testing_notes": "Review manually."}
+#     result.update({"tokens_in": tokens_in, "tokens_out": tokens_out, "cost_usd": round(cost, 4)})
+#     return result
+
+# async def create_github_pr(fix: Dict, error: Dict, gh_config: Dict) -> Dict:
+#     """Create a real GitHub PR for the fix"""
+#     token = gh_config.get("token", "")
+#     org = gh_config.get("org", "")
+#     repo = error.get("repo", "")
+    
+#     if not token or not org or not repo:
+#         return {"success": False, "error": "GitHub not configured"}
+    
+#     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "Content-Type": "application/json"}
+#     repo_full = f"{org}/{repo}"
+    
+#     async with httpx.AsyncClient(timeout=30) as client:
+#         # Get default branch
+#         r = await client.get(f"https://api.github.com/repos/{repo_full}", headers=headers)
+#         if r.status_code != 200:
+#             return {"success": False, "error": f"Cannot access repo: {r.status_code}"}
+        
+#         default_branch = r.json().get("default_branch", "main")
+        
+#         # Get latest commit SHA
+#         r2 = await client.get(f"https://api.github.com/repos/{repo_full}/git/ref/heads/{default_branch}", headers=headers)
+#         if r2.status_code != 200:
+#             return {"success": False, "error": "Cannot get branch SHA"}
+        
+#         sha = r2.json()["object"]["sha"]
+        
+#         # Create branch
+#         branch_name = f"fix/ai-errmon-{fix.get('_id', 'fix')}"
+#         r3 = await client.post(f"https://api.github.com/repos/{repo_full}/git/refs", 
+#             headers=headers, json={"ref": f"refs/heads/{branch_name}", "sha": sha})
+#         if r3.status_code not in (201, 422):  # 422 = branch exists
+#             return {"success": False, "error": f"Cannot create branch: {r3.status_code}"}
+        
+#         # Create PR
+#         pr_body = f"""## AI-Generated Fix
+
+# **Root Cause:** {fix.get('rca', '')[:500]}
+
+# **Explanation:** {fix.get('explanation', '')[:500]}
+
+# **Testing Notes:**
+# {fix.get('testing_notes', '')}
+
+# ---
+# *Generated by AI Error Monitor | Model: {fix.get('model', 'claude')} | Cost: ${fix.get('cost_usd', 0):.4f}*"""
+        
+#         r4 = await client.post(f"https://api.github.com/repos/{repo_full}/pulls", 
+#             headers=headers, json={
+#                 "title": f"fix: AI-generated fix for {error.get('error_type', 'error')} in {repo}",
+#                 "body": pr_body,
+#                 "head": branch_name,
+#                 "base": default_branch
+#             })
+        
+#         if r4.status_code == 201:
+#             pr = r4.json()
+#             return {"success": True, "pr_number": pr["number"], "pr_url": pr["html_url"], "branch": branch_name}
+#         else:
+#             return {"success": False, "error": f"PR creation failed: {r4.status_code} {r4.text[:200]}"}
+
+# async def create_jira_ticket(fix: Dict, error: Dict, jira_config: Dict, board_key: str, epic_key: Optional[str] = None) -> Dict:
+#     """Create a real Jira ticket"""
+#     email = jira_config.get("email", "")
+#     token = jira_config.get("token", "")
+#     base_url = jira_config.get("base_url", "").rstrip("/")
+    
+#     if not email or not token or not base_url:
+#         return {"success": False, "error": "Jira not configured"}
+    
+#     import base64
+#     auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+#     headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json", "Accept": "application/json"}
+    
+#     # Find custom fields from board config
+#     boards = jira_config.get("boards", [])
+#     board = next((b for b in boards if b.get("key") == board_key), {})
+#     custom_fields = {}
+#     for f in board.get("custom_fields", []):
+#         if f.get("id") and f.get("value"):
+#             try:
+#                 custom_fields[f["id"]] = json.loads(f["value"])
+#             except:
+#                 custom_fields[f["id"]] = f["value"]
+    
+#     issue_data = {
+#         "fields": {
+#             "project": {"key": board_key},
+#             "summary": f"[AI Fix] {error.get('error_type', 'Error')} in {error.get('service', 'service')}",
+#             "description": {
+#                 "type": "doc",
+#                 "version": 1,
+#                 "content": [{
+#                     "type": "paragraph",
+#                     "content": [{"type": "text", "text": f"Root Cause: {fix.get('rca', '')[:1000]}"}]
+#                 }]
+#             },
+#             "issuetype": {"name": "Bug"},
+#             **custom_fields
+#         }
+#     }
+    
+#     if epic_key:
+#         issue_data["fields"]["parent"] = {"key": epic_key}
+    
+#     async with httpx.AsyncClient(timeout=15) as client:
+#         r = await client.post(f"{base_url}/rest/api/3/issue", headers=headers, json=issue_data)
+#         if r.status_code == 201:
+#             issue = r.json()
+#             return {
+#                 "success": True,
+#                 "jira_id": issue["key"],
+#                 "jira_url": f"{base_url}/browse/{issue['key']}"
+#             }
+#         else:
+#             return {"success": False, "error": f"Jira returned {r.status_code}: {r.text[:300]}"}

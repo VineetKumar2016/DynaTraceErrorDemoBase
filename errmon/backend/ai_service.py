@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, AsyncGenerator
 from database import db
+import constants
 
 async def get_ai_config():
     doc = await db.settings.find_one({"key": "ai"})
@@ -418,14 +419,14 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
         import subprocess
         import tempfile
         import shutil
+        import logging
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'frontend', 'src', 'Utilities'))
         
         # Get GitHub config from settings
         gh_config = await get_github_config()
         gh_token = gh_config.get("token", "")
         gh_org = gh_config.get("org", "")
-        gh_org = gh_org or "v2dev"  # Default org if not set
-        gemini_api_key = gh_config.get("gemini_api_key", "")
+        gh_org = gh_org or constants.GIT_USER_NAME  # Default org if not set
 
         if not gh_token or not gh_org:
             return f"Error: GitHub token or organization not configured. Please configure GitHub settings first."
@@ -434,38 +435,21 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
         
         # Get AI config from settings
         ai_config = await get_ai_config()
-        # api_key = ai_config.get("api_key", "")
         api_key = ai_config.get("investigation_api_key", "")
         
         if not api_key:
             return f"Error: AI API key not configured. Please configure AI settings first."
         
-        # Step 1: Generate AI fix response
+        # Step 1: Initialize AI client
         client = GenAIClient(api_key=api_key)
-        
-        fix_response = client.generate_fix(
-            repo_name=repo_name,
-            error_message=error_message,
-            prompt=prompt
-        )
-        
-        # Step 2: Perform git operations
-        import logging
         logging.info(f"Creating fix branch for {repo_name}")
         
         # Create temporary directory for cloning
         temp_dir = tempfile.mkdtemp(prefix="fix_")
         try:
-            # Construct repo URL using gh_token, gh_org, and repo_name
-            repo_url = f"https://{gh_token}@github.com/{gh_org}/{repo_name}.git"
-            
-
-          
-
+            repo_url = constants.GIT_HUB_REPO
             repo_path = os.path.join(temp_dir, repo_name)
-            print(f"Cloning repository {gh_org}/{repo_name} into {repo_path}...")
             
-            # Clone the repository
             logging.info(f"Cloning repository: {repo_name}")
             subprocess.run(
                 ["git", "clone", repo_url, repo_path],
@@ -499,8 +483,7 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
             
             # Create new branch from main
             timestamp = datetime.now().strftime("%y%m%d-%H%M")
-            branch_name = "new-fixex"
-            branch_name = f"{branch_name}-{timestamp}"
+            branch_name = f"ai-detected-error-{timestamp}"
             logging.info(f"Creating branch: {branch_name}")
             subprocess.run(
                 ["git", "checkout", "-b", branch_name, "origin/main"],
@@ -508,22 +491,64 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
                 check=True,
                 capture_output=True
             )
+
+            # Step 2: Generate AI fix response
+            org_repo = constants.ORG_REPO
+            enhanced_prompt = f"""
+You are an expert React/JavaScript engineer.
+Analyze and fix the error in the repository {org_repo + "/" + branch_name}.
+Repository: {org_repo + "/" + branch_name}
+# Branch Name: {branch_name}
+
+Error:
+{error_message}
+
+Constraints:
+- Maintain existing functionality
+- Do not remove unrelated code
+- Ensure code compiles successfully
+
+Return 
+    ONLY the complete updated file.
+"""
+            print("enhanced_prompt ::Generating fix with AI...", enhanced_prompt)
+            # print("REPO :::: Repo name:", repo_name + "/" + branch_name)
+            fix_response = ""
+            fix_response = client.generate_fix(
+                repo_name=repo_name + "/" + branch_name,
+                error_message=error_message,
+                prompt=enhanced_prompt
+            )
+
+            logging.info(f"AI Fix Response RECEIVED:\n{fix_response}")
             
-            # Step 3: Create a fix implementation file (summary of AI fix)
+            # Step 3: Parse AI response and apply fixes
+            ai_analysis = parse_ai_response(fix_response)
+            files_modified = await apply_fixes_to_repo(repo_path, ai_analysis)
+            
+            # Step 4: Create fix summary file
             fix_file_path = os.path.join(repo_path, "AI_FIX_SUMMARY.md")
             fix_summary = f"""# AI-Generated Fix Summary
 
-## Error
-{error_message}
+## Error Analysis
+{ai_analysis.get('rca', 'No RCA available')}
 
-## AI Analysis and Recommendations
-{fix_response}
+## Explanation
+{ai_analysis.get('explanation', 'No explanation available')}
 
-## Generated At
-{datetime.now(timezone.utc).isoformat()}
+## Files Modified
+{json.dumps(files_modified, indent=2)}
+
+## Testing Notes
+# {ai_analysis.get('testing_notes', 'Manual testing required')}
 
 ## Repository
 {repo_name}
+
+## Raw AI Response
+```json
+{fix_response}
+```
 """
             with open(fix_file_path, 'w') as f:
                 f.write(fix_summary)
@@ -557,7 +582,7 @@ async def generate_fix(repo_name: str, error_message: str, prompt: str) -> str:
                 timeout=30
             )
             
-            # Step 4: Create PR using GitHub API
+            # Step 5: Create PR using GitHub API
             pr_result = await create_github_pr_from_branch(
                 gh_token=gh_token,
                 org=gh_org,
@@ -576,8 +601,12 @@ PR Status: {pr_result.get('status', 'Created')}
 PR URL: {pr_result.get('pr_url', 'N/A')}
 PR Number: {pr_result.get('pr_number', 'N/A')}
 
-AI Analysis:
-{fix_response}
+Files Modified: {len(files_modified)}
+{', '.join(files_modified) if files_modified else 'No files modified (summary only)'}
+
+AI Analysis Summary:
+RCA: {ai_analysis.get('rca', '')[:300]}...
+Severity: {ai_analysis.get('severity', 'unknown')}
 """
             return success_msg
             
@@ -585,7 +614,7 @@ AI Analysis:
             logging.error(f"Git command error: {e}")
             return f"Error executing git command: {e.stderr.decode() if e.stderr else str(e)}"
         except Exception as e:
-            logging.error(f"Error in generate_fix: {e}")
+            logging.error(f"Error in generate fix: {e}")
             return f"Error generating fix: {str(e)}"
         finally:
             # Cleanup temporary directory
@@ -613,7 +642,7 @@ async def create_github_pr_from_branch(gh_token: str, org: str, repo_name: str,
         Dictionary with PR details
     """
 
-    print(f"Creating PR for {org}/{repo_name} from branch {branch_name}...")
+    # print(f"Creating PR for {org}/{repo_name} from branch {branch_name}...")
     try:
         headers = {
             "Authorization": f"Bearer {gh_token}",
@@ -621,9 +650,15 @@ async def create_github_pr_from_branch(gh_token: str, org: str, repo_name: str,
             "Content-Type": "application/json"
         }
 
-        org = ""
+        repo_url = constants.GIT_HUB_REPO
+        org = repo_url.split(":")[1].split("/")[0]
+
+        # org = parse_github_url(repo_url).get("user", org)
+        print(f"Parsed org: {org} from repo URL: {repo_url}")
+        # org = "VineetKumar2016"
 
         repo_full = f"{org}/{repo_name}"
+        # repo_full = "git@github.com:VineetKumar2016/Clone_Demo_Repo.git"
         
         pr_title = f"fix: AI-generated fix for error in {repo_name}"
         pr_body = f"""## AI-Generated Fix for {repo_name}
@@ -649,12 +684,12 @@ async def create_github_pr_from_branch(gh_token: str, org: str, repo_name: str,
 ---
 *Generated by AI Error Monitor*
 """
-        print(f"Creating PR with title: {pr_title}")
-        print(f"Repo FULL: {repo_full}") 
-        print(f"Branch: {branch_name}")
-        # print(f"PR Body: {pr_body[:500]}...") 
-        print("title length:", len(pr_title), pr_title)
-        
+    # print(f"Creating PR with title: {pr_title}")
+    # print(f"Repo FULL: {repo_full}") 
+    # print(f"Branch: {branch_name}")
+    # # print(f"PR Body: {pr_body[:500]}...") 
+    # print("title length:", len(pr_title), pr_title)
+    
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
                 f"https://api.github.com/repos/{repo_full}/pulls",
@@ -697,3 +732,153 @@ async def create_github_pr_from_branch(gh_token: str, org: str, repo_name: str,
         import logging
         logging.error(f"Error creating PR: {e}")
         return {"status": "Error", "error": str(e)}
+
+
+def parse_ai_response(response: str) -> Dict[str, Any]:
+    """Parse AI-generated response and extract structured data.
+    
+    Args:
+        response: AI response (JSON or text)
+        
+    Returns:
+        Dictionary with parsed AI analysis
+    """
+    try:
+        # Try to extract JSON from response
+        if "```json" in response:
+            json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response)
+            if json_match:
+                try:
+                    return json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+        
+        if "```" in response:
+            json_match = re.search(r'```\s*([\s\S]*?)\s*```', response)
+            if json_match:
+                try:
+                    return json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+        
+        # Try direct JSON parse
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+        
+        # Fallback: return text as RCA
+        return {
+            "rca": response[:500] if len(response) > 500 else response,
+            "explanation": response[500:1000] if len(response) > 500 else "See RCA",
+            "severity": "medium",
+            "proposed_changes": [],
+            "testing_notes": "Manual review required"
+        }
+    except Exception as e:
+        import logging
+        logging.error(f"Error parsing AI response: {e}")
+        return {
+            "rca": "Failed to parse AI response",
+            "explanation": str(e),
+            "severity": "high",
+            "proposed_changes": [],
+            "testing_notes": "Manual fix required"
+        }
+
+
+async def apply_fixes_to_repo(repo_path: str, ai_analysis: Dict[str, Any]) -> list:
+    """Apply proposed fixes from AI analysis to repository files.
+    
+    Args:
+        repo_path: Path to the cloned repository
+        ai_analysis: Dictionary containing proposed changes
+        
+    Returns:
+        List of modified files
+    """
+    import logging
+    import os
+    modified_files = []
+    
+    proposed_changes = ai_analysis.get("proposed_changes", [])
+    
+    for change in proposed_changes:
+        try:
+            file_path = change.get("file")
+            old_code = change.get("old_code", "")
+            new_code = change.get("new_code", "")
+            
+            if not file_path or not old_code or not new_code:
+                logging.warning(f"Skipping incomplete change: {file_path}")
+                continue
+            
+            full_path = os.path.join(repo_path, file_path)
+            
+            # Check if file exists
+            if not os.path.exists(full_path):
+                logging.warning(f"File not found: {full_path}")
+                continue
+            
+            # Read file
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            # Apply fix
+            if old_code in content:
+                updated_content = content.replace(old_code, new_code, 1)
+                
+                # Write back
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+                
+                modified_files.append(file_path)
+                logging.info(f"Applied fix to: {file_path}")
+            else:
+                logging.warning(f"Old code not found in {file_path}")
+                
+        except Exception as e:
+            logging.error(f"Error applying fix to {change.get('file')}: {e}")
+    
+    return modified_files
+
+
+def parse_github_url(url: str) -> dict:
+    """Parse GitHub repo URL and return components.
+    
+    Supports:
+    - git@github.com:user/repo.git
+    - https://github.com/user/repo.git
+    - https://github.com/user/repo
+    
+    Args:
+        url: GitHub repository URL
+        
+    Returns:
+        Dictionary with protocol, user, repo, and full_name
+    """
+    result = {
+        "protocol": None,
+        "user": None,
+        "repo": None,
+        "full_name": None
+    }
+
+    # Detect protocol
+    if url.startswith("git@"):
+        result["protocol"] = "ssh"
+    elif url.startswith("http"):
+        result["protocol"] = "https"
+
+    # Regex to extract user and repo
+    match = re.search(r'github\.com[:/](.*?)/(.*?)(\.git)?$', url)
+
+    if match:
+        user = match.group(1)
+        repo = match.group(2)
+
+        result["user"] = user
+        result["repo"] = repo
+        result["full_name"] = f"{user}/{repo}"
+
+    return result

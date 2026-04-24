@@ -128,8 +128,8 @@ export default function Settings() {
     try {
       const fixData = {
         repo_name: 'Clone_Demo_Repo',
-        error_message: 'plugin:vite:oxc] Transform failed with 3 errors: in src/App.jsx',
-        prompt: '1. create a branch from the main branch of provided repository. 2. fix the issue mentioned in the error message 3. push the branch in git. 4. After this raise the PR pointing to main branch. 5. Newly created branch and PR should be visible in Git.'
+        error_message: 'plugin:vite:oxc] Transform failed with 3 errors: in sample-react-app/src/App.jsx',
+        prompt: '1. Read the error message carefully. 2. fix the issue mentioned in the error message from  3. push the branch in git. 4. After this raise the PR pointing to main branch. 5. Newly created branch and PR should be visible in Git.'
       };
       
       const response = await generateFix(fixData);

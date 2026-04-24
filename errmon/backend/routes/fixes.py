@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException  # type: ignore
 from database import db
 from datetime import datetime, timezone
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel  # type: ignore
 
 # FIXES
 router = APIRouter(tags=["fixes"])
@@ -53,8 +53,10 @@ async def generate_fix(request: GenerateFixRequest):
             prompt=request.prompt
         )
         
-        # Parse PR information from the response using regex
+        # Parse PR and JIRA information from the response using regex
         pr_info = {}
+        jira_info = {}
+        
         if "PR URL:" in fix_response:
             # Extract PR URL
             match = re.search(r'PR URL:\s*(.+?)(?:\n|$)', fix_response)
@@ -76,15 +78,34 @@ async def generate_fix(request: GenerateFixRequest):
             if match:
                 pr_info["status"] = match.group(1).strip()
         
+        if "JIRA Ticket:" in fix_response:
+            # Extract JIRA ID
+            match = re.search(r'JIRA Ticket:\s*(.+?)(?:\n|$)', fix_response)
+            if match:
+                jira_info["ticket_id"] = match.group(1).strip()
+            
+            # Extract JIRA URL
+            match = re.search(r'JIRA URL:\s*(.+?)(?:\n|$)', fix_response)
+            if match:
+                jira_info["jira_url"] = match.group(1).strip()
+        
+        # Extract files modified count
+        files_modified = 0
+        match = re.search(r'Files Modified:\s*(\d+)', fix_response)
+        if match:
+            files_modified = int(match.group(1))
+        
         return {
             "success": True,
             "repo_name": request.repo_name,
             "error_message": request.error_message,
             "fix": fix_response,
             "pr_info": pr_info,
+            "jira_info": jira_info,
+            "files_modified": files_modified,
             "generated_at": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         import logging
-        logging.error(f"Error in generate_fix route: {e}")
+        logging.error(f"Error in generate fix route: {e}")
         raise HTTPException(500, f"Error generating fix: {str(e)}")
